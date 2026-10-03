@@ -6,7 +6,8 @@
 - 最终字节长度与 SHA-256；
 - 每个窗口的源区间（SOURCE 基准字典 / TARGET 前序窗口输出 / 无源段）；
 - 按指令顺序列出的 ADD、RUN、COPY 证据（尺寸、数据 hex、地址模式、U 空间地址、
-  解析后的实际指向区间、原始偏移）；
+  解析后的实际指向区间、原始偏移）；TARGET 窗口的 COPY 若读取跨过更早窗口的边界，
+  证据会按真实产出窗口拆成连续的多段（`ranges`），逐段给出窗口号与字节区间；
 - 失败时给出错误码与**首个原始偏移**，且不保留任何部分输出；
 - 可一键清空输入与结论。
 
@@ -33,7 +34,7 @@
 src/vcdiff.js          RFC 3284 严格解码器（默认码表、地址缓存、证据收集）
 src/server.js          零依赖 HTTP 服务（/healthz、/、/api/decode、/api/reset）
 static/index.html      校验台页面（原生 JS，无外部资源）
-test/vcdiff.test.js    解码器单元/拒绝用例（50 项）
+test/vcdiff.test.js    解码器单元/拒绝用例（47 项，含跨历史窗口来源分段）
 test/server.test.js    接口测试
 test/helpers/encoder.js 测试用最小 VCDIFF 编码器（可构造畸形流）
 fixtures/golden/       open-vcdiff 参考实现生成的黄金向量（7 组）
@@ -95,7 +96,7 @@ echo "exit=$?"
       "instructions": [
         { "seq": 0, "op": "COPY", "size": 5, "mode": "SELF",
           "address": 5, "encoded": 5, "encodedOffset": 0,
-          "range": { "area": "PRIOR_TARGET", "start": 10, "end": 15 },
+          "ranges": [ { "area": "PRIOR_TARGET", "start": 10, "end": 15, "producerWindow": 0 } ],
           "overlaps": false, "codeOffset": 30 }
       ]
     }

@@ -280,7 +280,6 @@ export function decodeVcdiff(delta, dictionary = new Uint8Array(0), options = {}
     let sourcePosition = 0;
     let sourceLength = 0;
     let source = new Uint8Array(0);
-    let targetProducerWindow = null;
 
     if (winIndicator !== 0) {
       const lenInfo = r.integer();
@@ -311,10 +310,6 @@ export function decodeVcdiff(delta, dictionary = new Uint8Array(0), options = {}
           );
         }
         source = output.subarray(sourcePosition, sourcePosition + sourceLength);
-        targetProducerWindow = windows.find((window) =>
-          sourcePosition >= window.targetOffset &&
-          sourcePosition < window.targetOffset + window.targetLength,
-        ) ?? null;
       }
     }
 
@@ -451,21 +446,77 @@ export function decodeVcdiff(delta, dictionary = new Uint8Array(0), options = {}
       return { address, encoded, encodedOffset };
     };
 
-    const describeRange = (uAddress, size) => {
+    // Split a COPY's actually-read bytes into one provenance segment per
+    // producer window. Each entry covers a maximal run of bytes produced by a
+    // single earlier window; ranges are absolute output offsets, contiguous and
+    // in read order, so the segments concatenate back to the COPY bytes.
+    const describeHistorySegments = (uAddress, size, codeOffset) => {
+      const segments = [];
+      let pos = 0;
+      while (pos < size) {
+        const absOffset = sourcePosition + uAddress + pos;
+        const producer = windows.find((window) =>
+          absOffset >= window.targetOffset &&
+          absOffset < window.targetOffset + window.targetLength,
+        );
+        if (!producer) {
+          // Defensive: validity checks already proved every history byte lies
+          // inside the concatenated output of earlier windows.
+          throw new VcdiffError(
+            'SOURCE_RANGE',
+            `no earlier window owns target byte ${absOffset}`,
+            codeOffset,
+          );
+        }
+        // Extend the segment up to this producer window's end.
+        const take = Math.min(size - pos, producer.targetOffset + producer.targetLength - absOffset);
+        segments.push({
+          area: 'PRIOR_TARGET',
+          start: absOffset,
+          end: absOffset + take,
+          producerWindow: producer.index,
+        });
+        pos += take;
+      }
+      return segments;
+    };
+
+    // Evidence for a COPY.
+    //   * history bytes (uAddress < sourceLength): SOURCE dict copies yield one
+    //     SOURCE_DICT segment; TARGET copies are split per producer window, so a
+    //     COPY that straddles an earlier-window boundary reports every real
+    //     window and byte interval it read.
+    //   * current-window bytes: a single CURRENT_TARGET segment (self-overlapping
+    //     copies are byte-for-byte within this window).
+    // The earlier check that a COPY cannot straddle the source/current-target
+    // boundary guarantees only one of these families applies.
+    const describeCopy = (uAddress, size, codeOffset) => {
       if (uAddress < sourceLength) {
+        if (sourceKind === 'TARGET') {
+          return { segments: describeHistorySegments(uAddress, size, codeOffset) };
+        }
         const start = sourcePosition + uAddress;
         return {
-          area: sourceKind === 'TARGET' ? 'PRIOR_TARGET' : 'SOURCE_DICT',
-          start,
-          end: start + size,
-          producerWindow: targetProducerWindow?.index ?? null,
+          segments: [
+            {
+              area: 'SOURCE_DICT',
+              start,
+              end: start + size,
+              producerWindow: null,
+            },
+          ],
         };
       }
+      const start = windowOutputStart + (uAddress - sourceLength);
       return {
-        area: 'CURRENT_TARGET',
-        start: windowOutputStart + (uAddress - sourceLength),
-        end: windowOutputStart + (uAddress - sourceLength) + size,
-        producerWindow: windows.length,
+        segments: [
+          {
+            area: 'CURRENT_TARGET',
+            start,
+            end: start + size,
+            producerWindow: windows.length,
+          },
+        ],
       };
     };
 
@@ -550,6 +601,7 @@ export function decodeVcdiff(delta, dictionary = new Uint8Array(0), options = {}
           output[windowOutputStart + generated] = value;
           generated += 1;
         }
+        const { segments } = describeCopy(address, size, codeOffset);
         instructions.push({
           seq: order,
           op: 'COPY',
@@ -559,7 +611,7 @@ export function decodeVcdiff(delta, dictionary = new Uint8Array(0), options = {}
           encoded,
           encodedOffset,
           address,
-          range: describeRange(address, size),
+          ranges: segments,
           overlaps,
           codeOffset,
         });

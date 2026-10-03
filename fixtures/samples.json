@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-03T01:58:22.038Z",
+  "generatedAt": "2026-10-03T13:57:22.128Z",
   "dictionaryBase64": "MDEyMzQ1Njc4OS1IRUxMTy1ESUNU",
   "valid": {
     "deltaBase64": "1sPEAAABFQASGAAGBQJXT1JMRCF7BhQABAALAgsFDw0AAgUDPj4VMwEDdQUFBQ==",
@@ -20,5 +20,39 @@
   "truncated": {
     "deltaBase64": "1sPEAAABFQASGAAGBQJXT1JMRCF7BhQABAALAgsFDw0AAgUDPj4VMwEDdQ==",
     "expectedCode": "TRUNCATED"
+  },
+  "crossWindow": {
+    "deltaBase64": "1sPEAAABFQAHCgAAAQF6AAAQCgAKAQBBQkNERUZHSElKCwIKBQkPAAACAnoVAAU=",
+    "expectedLength": 35,
+    "expectedSha256": "612b8fb931a25c68919244e73a1bf03d471fff5ea7392e6849bd0bd60b9f3b12",
+    "expectedWindowCount": 3,
+    "straddle": {
+      "producerWindows": [
+        0,
+        1
+      ],
+      "ranges": [
+        {
+          "area": "PRIOR_TARGET",
+          "start": 5,
+          "end": 10
+        },
+        {
+          "area": "PRIOR_TARGET",
+          "start": 10,
+          "end": 15
+        }
+      ]
+    },
+    "single": {
+      "producerWindow": 1,
+      "start": 10,
+      "end": 15
+    }
+  },
+  "noDict": {
+    "deltaBase64": "1sPEAAAAFhAADgMATk8tRElDVElPTkFSWSoOAAM=",
+    "expectedLength": 16,
+    "expectedSha256": "52f708d14916c385032f26b1eeac6f3ae69d6edf8640e47cbf5f8e67fcc786e6"
   }
 }

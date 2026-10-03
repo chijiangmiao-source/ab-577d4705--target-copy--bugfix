@@ -215,6 +215,156 @@ describe('window sources and address caches', () => {
 });
 
 // ---------------------------------------------------------------------------
+// COPY provenance: a TARGET-window COPY that straddles earlier windows must
+// report one segment per real producer window; every other COPY keeps one.
+// ---------------------------------------------------------------------------
+
+describe('COPY provenance across history windows', () => {
+  const dict = te.encode('0123456789-HELLO-DICT');
+
+  test('TARGET COPY spanning two earlier windows reports both segments', () => {
+    // Window 0: output[0:10]  = "0123456789" (from dictionary)
+    const a = new WindowEncoder('SOURCE', 0, dict.length);
+    a.copy(0, 10);
+    // Window 1: output[10:20] = "ABCDEFGHIJ" (ADD, no source)
+    const b = new WindowEncoder('NONE');
+    b.add(te.encode('ABCDEFGHIJ'));
+    // Window 2: TARGET source segment output[5:15] = "56789ABCDE"
+    const c = new WindowEncoder('TARGET', 5, 10);
+    c.copy(0, 10); // straddles: window0 [5,10) then window1 [10,15)
+    c.copy(5, 5);  // wholly window 1: [10,15)
+    const res = decodeVcdiff(assemble(a.build(), b.build(), c.build()), dict);
+
+    assert.deepEqual(res.output, te.encode('0123456789ABCDEFGHIJ56789ABCDEABCDE'));
+    const copies = res.windows[2].instructions;
+
+    const straddle = copies[0];
+    assert.equal(straddle.ranges.length, 2);
+    assert.deepEqual(straddle.ranges, [
+      { area: 'PRIOR_TARGET', start: 5, end: 10, producerWindow: 0 },
+      { area: 'PRIOR_TARGET', start: 10, end: 15, producerWindow: 1 },
+    ]);
+
+    // Segments are contiguous and their lengths sum to the COPY size.
+    assert.equal(straddle.ranges[0].end, straddle.ranges[1].start);
+    assert.equal(
+      straddle.ranges.reduce((n, r) => n + (r.end - r.start), 0),
+      straddle.size,
+    );
+
+    const single = copies[1];
+    assert.deepEqual(single.ranges, [
+      { area: 'PRIOR_TARGET', start: 10, end: 15, producerWindow: 1 },
+    ]);
+  });
+
+  test('TARGET COPY spanning three earlier windows reports all three segments', () => {
+    // output: [0:6)="AAAAAA" [6:12)="BBBBBB" [12:18)="CCCCCC"
+    const a = new WindowEncoder('NONE');
+    a.run(0x41, 6);
+    const b = new WindowEncoder('NONE');
+    b.run(0x42, 6);
+    const c = new WindowEncoder('NONE');
+    c.run(0x43, 6);
+    // Final window reads output[3:15) = AAA BBB BBB CCC across all three.
+    const d = new WindowEncoder('TARGET', 3, 12);
+    d.copy(0, 12);
+    const res = decodeVcdiff(assemble(a.build(), b.build(), c.build(), d.build()));
+    const copy = res.windows[3].instructions[0];
+    assert.deepEqual(copy.ranges, [
+      { area: 'PRIOR_TARGET', start: 3, end: 6, producerWindow: 0 },
+      { area: 'PRIOR_TARGET', start: 6, end: 12, producerWindow: 1 },
+      { area: 'PRIOR_TARGET', start: 12, end: 15, producerWindow: 2 },
+    ]);
+    assert.deepEqual(
+      res.output.subarray(18),
+      te.encode('AAABBBBBBCCC'),
+    );
+  });
+
+  test('provenance segments reproduce the actual produced bytes', () => {
+    const a = new WindowEncoder('SOURCE', 0, dict.length);
+    a.copy(0, 10); // "0123456789"
+    const b = new WindowEncoder('NONE');
+    b.add(te.encode('ABCDEFGHIJ'));
+    const c = new WindowEncoder('TARGET', 5, 10);
+    c.copy(0, 10);
+    const res = decodeVcdiff(assemble(a.build(), b.build(), c.build()), dict);
+    const copy = res.windows[2].instructions[0];
+    const win2Start = res.windows[2].targetOffset;
+    copy.ranges.forEach((r, i) => {
+      const piece = res.output.subarray(r.start, r.end);
+      const produced = res.output.subarray(
+        win2Start + copy.ranges.slice(0, i).reduce((n, x) => n + (x.end - x.start), 0),
+        win2Start + copy.ranges.slice(0, i + 1).reduce((n, x) => n + (x.end - x.start), 0),
+      );
+      assert.deepEqual(Array.from(piece), Array.from(produced));
+    });
+  });
+
+  test('SOURCE dictionary COPY keeps a single SOURCE_DICT segment', () => {
+    const w = new WindowEncoder('SOURCE', 0, dict.length);
+    w.copy(0, 11);
+    const res = decodeVcdiff(assemble(w.build()), dict);
+    const copy = res.windows[0].instructions[0];
+    assert.equal(copy.ranges.length, 1);
+    assert.deepEqual(copy.ranges, [
+      { area: 'SOURCE_DICT', start: 0, end: 11, producerWindow: null },
+    ]);
+  });
+
+  test('self-overlapping current-window COPY keeps a single CURRENT_TARGET segment', () => {
+    const w = new WindowEncoder('NONE');
+    w.add(te.encode('ab'));
+    w.copy(0, 10, { mode: 1 });
+    const res = decodeVcdiff(assemble(w.build()));
+    const copy = res.windows[0].instructions.find((i) => i.op === 'COPY');
+    assert.equal(copy.overlaps, true);
+    assert.deepEqual(copy.ranges, [
+      { area: 'CURRENT_TARGET', start: 0, end: 10, producerWindow: 0 },
+    ]);
+  });
+
+  test('CURRENT_TARGET self copy after history bytes resolves inside its own window', () => {
+    const a = new WindowEncoder('NONE');
+    a.add(te.encode('XY'));
+    // Window 1 with no source: ADD then a HERE copy of the bytes just emitted.
+    const b = new WindowEncoder('NONE');
+    b.add(te.encode('ab'));
+    b.copy(0, 4, { mode: 1 }); // here=2, encoded 2 -> addr 0 -> "abab"
+    const res = decodeVcdiff(assemble(a.build(), b.build()));
+    const copy = res.windows[1].instructions[1];
+    assert.deepEqual(copy.ranges, [
+      { area: 'CURRENT_TARGET', start: 2, end: 6, producerWindow: 1 },
+    ]);
+    // Window 1 emits ADD "ab" then a 4-byte self copy -> "ab" + "abab".
+    assert.deepEqual(res.output, te.encode('XYababab'));
+  });
+
+  test('stream with no dictionary and no source segment decodes', () => {
+    const w = new WindowEncoder('NONE');
+    w.add(te.encode('NO-DICTIONARY'));
+    w.run(0x2a, 3);
+    const res = decodeVcdiff(assemble(w.build()), new Uint8Array(0));
+    assert.deepEqual(res.output, te.encode('NO-DICTIONARY***'));
+    assert.equal(res.windows[0].source.kind, 'NONE');
+  });
+
+  test('illegal TARGET COPY address is rejected across windows with no result', () => {
+    const a = new WindowEncoder('SOURCE', 0, dict.length);
+    a.copy(0, 4); // output[0:4]
+    const b = new WindowEncoder('NONE');
+    b.add(te.encode('AB')); // output[4:6]
+    // Window 2 source segment output[0:6); COPY at u-address 6 is a current
+    // target byte that has not been generated yet.
+    const c = new WindowEncoder('TARGET', 0, 6);
+    c.copy(6, 2, { mode: 1 }); // HERE encoded 0 -> addr 6, future
+    expectError(() => decodeVcdiff(assemble(a.build(), b.build(), c.build()), dict),
+      'COPY_NOT_GENERATED');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Rejection cases: each must report a code and a raw offset, and no output
 // ---------------------------------------------------------------------------
 

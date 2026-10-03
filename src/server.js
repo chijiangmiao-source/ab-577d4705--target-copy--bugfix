@@ -55,12 +55,16 @@ function serializeInstruction(ins) {
     out.encodedOffset = ins.encodedOffset;
     out.address = ins.address; // address inside the window's U = source||target space
     out.overlaps = ins.overlaps;
-    out.range = {
-      area: ins.range.area,
-      start: ins.range.start,
-      end: ins.range.end,
-      producerWindow: ins.range.producerWindow,
-    };
+    // One provenance entry per real source: a COPY spanning an earlier-window
+    // boundary lists each producer window and its exact byte interval; ordinary
+    // copies (single history window, dictionary, current-window self overlap)
+    // carry exactly one entry.
+    out.ranges = ins.ranges.map((r) => ({
+      area: r.area,
+      start: r.start,
+      end: r.end,
+      producerWindow: r.producerWindow,
+    }));
   }
   return out;
 }

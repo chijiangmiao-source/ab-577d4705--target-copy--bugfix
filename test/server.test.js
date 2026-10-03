@@ -77,13 +77,21 @@ describe('HTTP surface', () => {
       w2.instructions.filter((i) => i.op === 'COPY').map((i) => i.mode),
       ['SELF', 'NEAR0', 'SAME0'],
     );
-    // Every COPY exposes its U-space address and its resolved source/range.
+    // Every COPY exposes its U-space address and its resolved source range(s).
     for (const ins of w2.instructions.filter((i) => i.op === 'COPY')) {
       assert.equal(typeof ins.address, 'number');
       assert.equal(typeof ins.encodedOffset, 'number');
-      assert.ok(ins.range);
-      assert.ok(['PRIOR_TARGET', 'CURRENT_TARGET', 'SOURCE_DICT'].includes(ins.range.area));
-      assert.ok(ins.range.end > ins.range.start);
+      assert.ok(Array.isArray(ins.ranges));
+      assert.ok(ins.ranges.length >= 1);
+      for (const r of ins.ranges) {
+        assert.ok(['PRIOR_TARGET', 'CURRENT_TARGET', 'SOURCE_DICT'].includes(r.area));
+        assert.ok(r.end > r.start);
+      }
+      // The valid sample's window 2 source segment lies entirely inside window
+      // 1's output, so every copy has a single provenance segment from window 0.
+      assert.equal(ins.ranges.length, 1);
+      assert.equal(ins.ranges[0].producerWindow, 0);
+      assert.equal(ins.range, undefined);
     }
     // Window 1 has ADD/RUN/COPY evidence.
     assert.deepEqual(
@@ -94,6 +102,47 @@ describe('HTTP surface', () => {
     assert.equal(run.byteHex, '21');
     const add = w1.instructions.find((i) => i.op === 'ADD');
     assert.equal(Buffer.from(add.dataHex, 'hex').toString(), 'WORLD');
+  });
+
+  test('cross-window COPY reports one provenance segment per history window', async () => {
+    const resp = await post('/api/decode', {
+      deltaBase64: sample.crossWindow.deltaBase64,
+      dictionaryBase64: sample.dictionaryBase64,
+    });
+    assert.equal(resp.status, 200);
+    const data = await resp.json();
+    assert.equal(data.ok, true);
+    assert.equal(data.length, sample.crossWindow.expectedLength);
+    assert.equal(data.sha256, sample.crossWindow.expectedSha256);
+    assert.equal(data.windows.length, 3);
+
+    const copies = data.windows[2].instructions.filter((i) => i.op === 'COPY');
+    assert.equal(copies.length, 2);
+
+    // Straddling COPY: two contiguous segments, real window + interval each.
+    const straddle = copies[0];
+    assert.deepEqual(straddle.ranges, [
+      { area: 'PRIOR_TARGET', start: 5, end: 10, producerWindow: 0 },
+      { area: 'PRIOR_TARGET', start: 10, end: 15, producerWindow: 1 },
+    ]);
+    assert.equal(straddle.range, undefined);
+
+    // Ordinary TARGET COPY wholly inside one history window stays single.
+    assert.deepEqual(copies[1].ranges, [
+      { area: 'PRIOR_TARGET', start: 10, end: 15, producerWindow: 1 },
+    ]);
+  });
+
+  test('no-dictionary stream decodes without a dictionary', async () => {
+    const resp = await post('/api/decode', {
+      deltaBase64: sample.noDict.deltaBase64,
+      dictionaryBase64: '',
+    });
+    assert.equal(resp.status, 200);
+    const data = await resp.json();
+    assert.equal(data.ok, true);
+    assert.equal(data.length, sample.noDict.expectedLength);
+    assert.equal(data.sha256, sample.noDict.expectedSha256);
   });
 
   test('failure sample reports the first raw offset and keeps nothing', async () => {

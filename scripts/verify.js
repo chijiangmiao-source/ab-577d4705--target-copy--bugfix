@@ -73,6 +73,67 @@ async function smokeTest(baseUrl) {
     `window 2 copy modes SELF/NEAR0/SAME0 (got ${copyModes})`);
   expect(w2.instructions.every((ins, idx) => ins.seq === idx), 'instructions listed in execution order');
 
+  // Ordinary TARGET copies still have exactly one provenance segment.
+  expect(
+    w2.instructions.filter((i) => i.op === 'COPY').every((i) => i.ranges.length === 1),
+    'ordinary TARGET copies keep a single provenance segment',
+  );
+
+  // --- three-window stream: one COPY straddles two history windows ----------
+  const crossResp = await fetch(`${baseUrl}/api/decode`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      deltaBase64: samples.crossWindow.deltaBase64,
+      dictionaryBase64: samples.dictionaryBase64,
+    }),
+  });
+  expect(crossResp.status === 200, `cross-window sample HTTP 200 (got ${crossResp.status})`);
+  const cross = await crossResp.json();
+  expect(cross.ok === true, 'cross-window sample ok=true');
+  expect(cross.length === samples.crossWindow.expectedLength,
+    `cross-window length ${cross.length} == ${samples.crossWindow.expectedLength}`);
+  expect(cross.sha256 === samples.crossWindow.expectedSha256,
+    `cross-window sha256 ${cross.sha256}`);
+  expect(cross.windows.length === 3,
+    `cross-window window count ${cross.windows.length} == 3`);
+  const crossCopies = cross.windows[2].instructions.filter((i) => i.op === 'COPY');
+  const straddle = crossCopies[0];
+  expect(straddle.ranges.length === 2,
+    `straddling COPY reports 2 provenance segments (got ${straddle.ranges.length})`);
+  const segExpect = samples.crossWindow.straddle;
+  for (let i = 0; i < 2; i++) {
+    const got = straddle.ranges[i];
+    const want = segExpect.ranges[i];
+    expect(got && got.area === 'PRIOR_TARGET' &&
+      got.start === want.start && got.end === want.end &&
+      got.producerWindow === segExpect.producerWindows[i],
+      `straddling segment ${i}: window #${segExpect.producerWindows[i]} [${want.start},${want.end}) ` +
+        `(got ${got ? JSON.stringify(got) : 'missing'})`);
+  }
+  // Segments concatenate back to the COPY bytes and are contiguous.
+  expect(straddle.ranges[0].end === straddle.ranges[1].start &&
+    straddle.ranges[0].start + straddle.size === straddle.ranges[1].end,
+    'straddling segments are contiguous and cover the whole COPY');
+  const single = crossCopies[1];
+  expect(single.ranges.length === 1 &&
+    single.ranges[0].producerWindow === samples.crossWindow.single.producerWindow &&
+    single.ranges[0].start === samples.crossWindow.single.start &&
+    single.ranges[0].end === samples.crossWindow.single.end,
+    'follow-on COPY stays inside one history window (#1 [10,15))');
+
+  // --- no-dictionary stream --------------------------------------------------
+  const ndResp = await fetch(`${baseUrl}/api/decode`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ deltaBase64: samples.noDict.deltaBase64, dictionaryBase64: '' }),
+  });
+  expect(ndResp.status === 200, `no-dictionary sample HTTP 200 (got ${ndResp.status})`);
+  const nd = await ndResp.json();
+  expect(nd.ok === true && nd.length === samples.noDict.expectedLength &&
+    nd.sha256 === samples.noDict.expectedSha256 && nd.windows.length === 1,
+    'no-dictionary stream decodes with correct length and sha256');
+
   // --- failure path: first raw offset, no output ---------------------------
   const badResp = await fetch(`${baseUrl}/api/decode`, {
     method: 'POST',

@@ -142,6 +142,18 @@ function describeRange(r) {
   return area + ' ' + span + producer;
 }
 
+// A COPY may read across an earlier-window boundary; the API then returns one
+// provenance segment per real producer window. Render each on its own line so
+// the history evidence can be recomputed segment by segment, in read order.
+function describeRanges(ranges) {
+  if (!Array.isArray(ranges) || ranges.length === 0) return '';
+  if (ranges.length === 1) return describeRange(ranges[0]);
+  const head = `<div class="muted" style="margin-bottom:3px">跨界 ${ranges.length} 段历史读取：</div>`;
+  return head + ranges.map((r, i) =>
+    `<div style="margin-bottom:2px">${describeRange(r)} <span class="muted">第 ${i + 1} 段 · ${r.end - r.start} B</span></div>`,
+  ).join('');
+}
+
 function renderInstruction(ins) {
   const cells = [];
   cells.push(`<td class="num">${ins.seq}</td>`);
@@ -159,7 +171,7 @@ function renderInstruction(ins) {
     cells.push(`<td class="num">${ins.size}</td>`);
     cells.push(`<td>U地址 <span class="hex">${ins.address}</span><br>
       <span class="muted">编码值 ${ins.encoded} @偏移 ${ins.encodedOffset}${ins.overlaps ? ' · 自重叠逐字节' : ''}</span></td>`);
-    cells.push(`<td>${describeRange(ins.range)}</td>`);
+    cells.push(`<td>${describeRanges(ins.ranges)}</td>`);
     cells.push('<td></td>');
   }
   cells.push(`<td class="num muted">${ins.codeOffset}</td>`);
