@@ -6,7 +6,9 @@
 - 最终字节长度与 SHA-256；
 - 每个窗口的源区间（SOURCE 基准字典 / TARGET 前序窗口输出 / 无源段）；
 - 按指令顺序列出的 ADD、RUN、COPY 证据（尺寸、数据 hex、地址模式、U 空间地址、
-  解析后的实际指向区间、原始偏移）；
+  解析后的实际指向区间、原始偏移）；TARGET 源区间跨越两个历史窗口的 COPY 会按
+  **实际产出字节连续分段**，每段给出真实来源窗口与区间（`ranges`，并置
+  `crossesWindows: true`）；
 - 失败时给出错误码与**首个原始偏移**，且不保留任何部分输出；
 - 可一键清空输入与结论。
 
@@ -95,14 +97,22 @@ echo "exit=$?"
       "instructions": [
         { "seq": 0, "op": "COPY", "size": 5, "mode": "SELF",
           "address": 5, "encoded": 5, "encodedOffset": 0,
-          "range": { "area": "PRIOR_TARGET", "start": 10, "end": 15 },
-          "overlaps": false, "codeOffset": 30 }
+          "range": { "area": "PRIOR_TARGET", "start": 10, "end": 15, "producerWindow": 0 },
+          "ranges": [ { "area": "PRIOR_TARGET", "start": 10, "end": 15, "producerWindow": 0 } ],
+          "crossesWindows": false, "overlaps": false, "codeOffset": 30 }
       ]
     }
   ],
   "limits": { "maxOutputBytes": 524288, "maxWindows": 8 }
 }
 ```
+
+每条 COPY 的 `ranges` 是其历史读取依据：各段连续、有序、长度之和等于 COPY
+尺寸，可直接在最终输出上按 `[start, end)` 复算出该 COPY 的真实字节。普通
+SOURCE 字典 COPY、只落在一个历史窗口的 TARGET COPY、当前窗口自重叠 COPY 都
+只有一个元素（且与 `range` 相同）；当 TARGET 源区间从较早窗口起始并延续到
+下一历史窗口时，跨界 COPY 的 `ranges` 分别给出每段窗口与区间，`range` 仅保留
+整体读取区间（`producerWindow: null`），`crossesWindows` 为 `true`。
 
 失败 `400/413`：
 

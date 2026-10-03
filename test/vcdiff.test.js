@@ -215,6 +215,160 @@ describe('window sources and address caches', () => {
 });
 
 // ---------------------------------------------------------------------------
+// TARGET source segments that span the boundary of two earlier windows
+// ---------------------------------------------------------------------------
+
+describe('cross-window TARGET source COPY evidence', () => {
+  const dict = te.encode('0123456789-HELLO-DICT'); // 21 bytes
+
+  // Three windows:
+  //   #0 SOURCE -> "0123456789-WORLD"        (output [0, 16))
+  //   #1 NONE   -> "ABCDEFGH"                (output [16, 24))
+  //   #2 TARGET source segment output[13,24) = "WORLDABCDEFGH" (s = 11)
+  // The first COPY starts in window 0's tail and reads into window 1.
+  function buildThreeWindowStream() {
+    const w1 = new WindowEncoder('SOURCE', 0, dict.length);
+    w1.copy(0, 11); // "0123456789-"
+    w1.add(te.encode('WORLD'));
+
+    const w2 = new WindowEncoder('NONE');
+    w2.add(te.encode('ABCDEFGH'));
+
+    const w3 = new WindowEncoder('TARGET', 13, 11);
+    w3.copy(2, 6); // U addr 2 -> output[15]: "D" (win0) + "ABCDE" (win1)
+    w3.copy(8, 3); // U addr 8 -> output[21]: "FGH", entirely in window 1
+    w3.add(te.encode('!!'));
+
+    return {
+      delta: assemble(w1.build(), w2.build(), w3.build()),
+      expected: te.encode('0123456789-WORLDABCDEFGHDABCDEFGH!!'),
+    };
+  }
+
+  test('decoded bytes and length are unchanged when a COPY spans two windows', () => {
+    const { delta, expected } = buildThreeWindowStream();
+    const res = decodeVcdiff(delta, dict);
+    assert.equal(res.windows.length, 3);
+    assert.equal(res.length, expected.length);
+    assert.deepEqual(res.output, expected);
+  });
+
+  test('crossing COPY reports one evidence segment per producing window', () => {
+    const { delta } = buildThreeWindowStream();
+    const res = decodeVcdiff(delta, dict);
+    const copies = res.windows[2].instructions.filter((i) => i.op === 'COPY');
+    const crossing = copies[0];
+
+    assert.equal(crossing.size, 6);
+    assert.equal(crossing.crossesWindows, true);
+    assert.ok(Array.isArray(crossing.ranges));
+    assert.equal(crossing.ranges.length, 2);
+
+    assert.deepEqual(crossing.ranges[0], {
+      area: 'PRIOR_TARGET',
+      start: 15,
+      end: 16,
+      producerWindow: 0,
+    });
+    assert.deepEqual(crossing.ranges[1], {
+      area: 'PRIOR_TARGET',
+      start: 16,
+      end: 21,
+      producerWindow: 1,
+    });
+
+    // Segments are contiguous, ordered and cover exactly the produced bytes.
+    const covered = crossing.ranges.reduce((n, s) => n + (s.end - s.start), 0);
+    assert.equal(covered, crossing.size);
+    assert.equal(crossing.ranges[0].end, crossing.ranges[1].start);
+
+    // The aggregate interval must not be attributed to either single window.
+    assert.equal(crossing.range.producerWindow, null);
+    assert.equal(crossing.range.start, 15);
+    assert.equal(crossing.range.end, 21);
+
+    // The evidence reproduces the actual output bytes of the COPY.
+    const evidence = crossing.ranges.map((s) =>
+      res.output.subarray(s.start, s.end),
+    );
+    assert.deepEqual(
+      Buffer.concat(evidence.map((s) => Buffer.from(s))),
+      Buffer.from('DABCDE'),
+    );
+  });
+
+  test('a COPY lying entirely inside one historical window keeps a single segment', () => {
+    const { delta } = buildThreeWindowStream();
+    const res = decodeVcdiff(delta, dict);
+    const copies = res.windows[2].instructions.filter((i) => i.op === 'COPY');
+    const single = copies[1];
+    assert.equal(single.crossesWindows, false);
+    assert.equal(single.ranges.length, 1);
+    assert.deepEqual(single.range, single.ranges[0]);
+    assert.deepEqual(single.ranges[0], {
+      area: 'PRIOR_TARGET',
+      start: 21,
+      end: 24,
+      producerWindow: 1,
+    });
+  });
+
+  test('a COPY starting exactly on a window boundary is not split', () => {
+    const w1 = new WindowEncoder('SOURCE', 0, dict.length);
+    w1.copy(0, 11);
+    w1.add(te.encode('WORLD')); // [0,16)
+    const w2 = new WindowEncoder('NONE');
+    w2.add(te.encode('ABCDEFGH')); // [16,24)
+    const w3 = new WindowEncoder('TARGET', 13, 11);
+    w3.copy(3, 4); // output[16:20] = "ABCD", boundary start, window 1 only
+    const res = decodeVcdiff(assemble(w1.build(), w2.build(), w3.build()), dict);
+    const copy = res.windows[2].instructions[0];
+    assert.equal(copy.crossesWindows, false);
+    assert.equal(copy.ranges.length, 1);
+    assert.equal(copy.ranges[0].producerWindow, 1);
+    assert.deepEqual([copy.ranges[0].start, copy.ranges[0].end], [16, 20]);
+  });
+
+  test('SOURCE-dictionary COPY, self-overlap and dict-less copies keep single-segment evidence', () => {
+    // SOURCE dictionary COPY.
+    const wd = new WindowEncoder('SOURCE', 0, dict.length);
+    wd.copy(0, 4);
+    const rd = decodeVcdiff(assemble(wd.build()), dict);
+    const dc = rd.windows[0].instructions[0];
+    assert.equal(dc.crossesWindows, false);
+    assert.deepEqual(dc.range, {
+      area: 'SOURCE_DICT', start: 0, end: 4, producerWindow: null,
+    });
+    assert.deepEqual(dc.ranges, [dc.range]);
+
+    // Current-window self-overlapping COPY.
+    const wo = new WindowEncoder('NONE');
+    wo.add(te.encode('ab'));
+    wo.copy(0, 10, { mode: 1 });
+    const ro = decodeVcdiff(assemble(wo.build()));
+    const oc = ro.windows[0].instructions.find((i) => i.op === 'COPY');
+    assert.equal(oc.ranges.length, 1);
+    assert.equal(oc.range.area, 'CURRENT_TARGET');
+    assert.equal(oc.range.producerWindow, 0);
+    assert.equal(oc.overlaps, true);
+
+    // Dictionary-less stream crossing two prior windows.
+    const n1 = new WindowEncoder('NONE');
+    n1.add(te.encode('AAAA'));
+    const n2 = new WindowEncoder('NONE');
+    n2.add(te.encode('BBBB'));
+    const n3 = new WindowEncoder('TARGET', 2, 4); // output[2:6] = "AABB"
+    n3.copy(0, 4);
+    const rn = decodeVcdiff(assemble(n1.build(), n2.build(), n3.build()), new Uint8Array(0));
+    assert.deepEqual(rn.output, te.encode('AAAABBBBAABB'));
+    const nc = rn.windows[2].instructions[0];
+    assert.equal(nc.ranges.length, 2);
+    assert.deepEqual(nc.ranges.map((s) => [s.producerWindow, s.start, s.end]),
+      [[0, 2, 4], [1, 4, 6]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Rejection cases: each must report a code and a raw offset, and no output
 // ---------------------------------------------------------------------------
 

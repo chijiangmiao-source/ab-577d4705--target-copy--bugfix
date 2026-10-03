@@ -61,6 +61,17 @@ function serializeInstruction(ins) {
       end: ins.range.end,
       producerWindow: ins.range.producerWindow,
     };
+    // When a TARGET-source COPY crosses the boundary between earlier windows,
+    // ranges lists one evidence segment per producing window (contiguous, in
+    // order, lengths summing to size). For every other COPY it holds exactly
+    // one element identical to range.
+    out.crossesWindows = ins.crossesWindows === true;
+    out.ranges = ins.ranges.map((segment) => ({
+      area: segment.area,
+      start: segment.start,
+      end: segment.end,
+      producerWindow: segment.producerWindow,
+    }));
   }
   return out;
 }

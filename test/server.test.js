@@ -96,8 +96,79 @@ describe('HTTP surface', () => {
     assert.equal(Buffer.from(add.dataHex, 'hex').toString(), 'WORLD');
   });
 
-  test('failure sample reports the first raw offset and keeps nothing', async () => {
+  test('cross-window sample: COPY evidence is split per producing window', async () => {
     const resp = await post('/api/decode', {
+      deltaBase64: sample.crossWindow.deltaBase64,
+      dictionaryBase64: sample.dictionaryBase64,
+    });
+    assert.equal(resp.status, 200);
+    const data = await resp.json();
+    assert.equal(data.ok, true);
+    assert.equal(data.length, sample.crossWindow.expectedLength);
+    assert.equal(data.sha256, sample.crossWindow.expectedSha256);
+    assert.equal(data.windows.length, 3);
+
+    const win = data.windows[2];
+    assert.equal(win.source.kind, 'TARGET');
+    const copies = win.instructions.filter((i) => i.op === 'COPY');
+    const crossing = copies[0];
+    assert.equal(crossing.size, 6);
+    assert.equal(crossing.crossesWindows, true);
+    assert.deepEqual(crossing.ranges, [
+      { area: 'PRIOR_TARGET', start: 15, end: 16, producerWindow: 0 },
+      { area: 'PRIOR_TARGET', start: 16, end: 21, producerWindow: 1 },
+    ]);
+    // Aggregate interval present but not attributed to one window.
+    assert.equal(crossing.range.producerWindow, null);
+    assert.equal(crossing.range.start, 15);
+    assert.equal(crossing.range.end, 21);
+    // Contiguous, ordered, covers the whole COPY.
+    assert.equal(crossing.ranges[0].end, crossing.ranges[1].start);
+    assert.equal(
+      crossing.ranges.reduce((n, s) => n + (s.end - s.start), 0),
+      crossing.size,
+    );
+
+    // The ordinary COPY in the same window stays single-segment.
+    const single = copies[1];
+    assert.equal(single.crossesWindows, false);
+    assert.equal(single.ranges.length, 1);
+    assert.equal(single.range.producerWindow, 1);
+    assert.deepEqual(single.range, single.ranges[0]);
+  });
+
+  test('cross-window sample without a dictionary decodes and splits evidence', async () => {
+    const resp = await post('/api/decode', {
+      deltaBase64: sample.noDict.deltaBase64,
+      dictionaryBase64: '',
+    });
+    assert.equal(resp.status, 200);
+    const data = await resp.json();
+    assert.equal(data.ok, true);
+    assert.equal(data.length, sample.noDict.expectedLength);
+    assert.equal(data.sha256, sample.noDict.expectedSha256);
+    const copy = data.windows[2].instructions.find((i) => i.op === 'COPY');
+    assert.equal(copy.crossesWindows, true);
+    assert.deepEqual(copy.ranges.map((s) => [s.producerWindow, s.start, s.end]),
+      [[0, 2, 4], [1, 4, 6]]);
+  });
+
+  test('existing COPY evidence keeps a single unchanged range', async () => {
+    const resp = await post('/api/decode', {
+      deltaBase64: sample.valid.deltaBase64,
+      dictionaryBase64: sample.dictionaryBase64,
+    });
+    const data = await (resp).json();
+    for (const w of data.windows) {
+      for (const ins of w.instructions.filter((i) => i.op === 'COPY')) {
+        assert.equal(ins.crossesWindows, false);
+        assert.equal(ins.ranges.length, 1);
+        assert.deepEqual(ins.range, ins.ranges[0]);
+      }
+    }
+  });
+
+  test('failure sample reports the first raw offset and keeps nothing', async () => {    const resp = await post('/api/decode', {
       deltaBase64: sample.badCopy.deltaBase64,
       dictionaryBase64: sample.dictionaryBase64,
     });

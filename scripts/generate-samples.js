@@ -53,6 +53,45 @@ function buildBadWindow2() {
   return w;
 }
 
+// ---- Three-window stream whose TARGET COPY crosses an earlier-window seam
+//   window 0: SOURCE -> "0123456789-WORLD"  output [0, 16)
+//   window 1: NONE   -> "ABCDEFGH"          output [16, 24)
+//   window 2: TARGET source segment output[13,24) = "WORLDABCDEFGH" (s = 11)
+// The first COPY at U address 2 reads output[15:21]: one byte ("D") produced
+// by window 0 followed by five bytes ("ABCDE") produced by window 1.
+function buildCrossWindowStream() {
+  const w1 = new WindowEncoder('SOURCE', 0, dictionary.length);
+  w1.copy(0, 11);
+  w1.add(encoder.encode('WORLD'));
+
+  const w2 = new WindowEncoder('NONE');
+  w2.add(encoder.encode('ABCDEFGH'));
+
+  const w3 = new WindowEncoder('TARGET', 13, 11);
+  w3.copy(2, 6);  // crosses the window-0/window-1 boundary at output[16]
+  w3.copy(8, 3);  // "FGH", entirely inside window 1
+  w3.add(encoder.encode('!!'));
+
+  return {
+    delta: assemble(w1.build(), w2.build(), w3.build()),
+    expectedOutput: encoder.encode('0123456789-WORLDABCDEFGHDABCDEFGH!!'),
+  };
+}
+
+// ---- Dictionary-less stream: a TARGET COPY crossing an earlier-window seam
+function buildNoDictStream() {
+  const w1 = new WindowEncoder('NONE');
+  w1.add(encoder.encode('AAAA'));          // output [0, 4)
+  const w2 = new WindowEncoder('NONE');
+  w2.add(encoder.encode('BBBB'));          // output [4, 8)
+  const w3 = new WindowEncoder('TARGET', 2, 4); // segment output[2:6] = "AABB"
+  w3.copy(0, 4);                           // "AA" (window 0) + "BB" (window 1)
+  return {
+    delta: assemble(w1.build(), w2.build(), w3.build()),
+    expectedOutput: encoder.encode('AAAABBBBAABB'),
+  };
+}
+
 const w1 = buildWindow1();
 const w2 = buildWindow2();
 const validDelta = assemble(w1.build(), w2.build());
@@ -75,6 +114,12 @@ function buildNonMinimal() {
 const nonMinimalDeltaFixed = buildNonMinimal();
 
 const truncatedDelta = validDelta.subarray(0, validDelta.length - 3);
+
+const crossWindow = buildCrossWindowStream();
+const crossResult = decodeVcdiff(crossWindow.delta, dictionary);
+
+const noDict = buildNoDictStream();
+const noDictResult = decodeVcdiff(noDict.delta, new Uint8Array(0));
 
 // ---- Decode and verify every expectation ----------------------------------
 const validResult = decodeVcdiff(validDelta, dictionary);
@@ -117,6 +162,35 @@ if (!truncError || truncError.code !== 'TRUNCATED') {
   throw new Error(`expected TRUNCATED, got ${truncError}`);
 }
 
+// ---- Cross-window evidence must split the COPY by producing window --------
+if (
+  crossResult.length !== crossWindow.expectedOutput.length ||
+  !crossResult.output.every((b, i) => b === crossWindow.expectedOutput[i])
+) {
+  throw new Error('cross-window sample output mismatch');
+}
+const crossCopy = crossResult.windows[2].instructions.filter((i) => i.op === 'COPY')[0];
+if (
+  crossCopy.size !== 6 ||
+  crossCopy.crossesWindows !== true ||
+  crossCopy.ranges.length !== 2 ||
+  crossCopy.ranges[0].start !== 15 || crossCopy.ranges[0].end !== 16 ||
+  crossCopy.ranges[0].producerWindow !== 0 ||
+  crossCopy.ranges[1].start !== 16 || crossCopy.ranges[1].end !== 21 ||
+  crossCopy.ranges[1].producerWindow !== 1 ||
+  crossCopy.range.producerWindow !== null
+) {
+  throw new Error(`cross-window sample evidence mismatch: ${JSON.stringify(crossCopy)}`);
+}
+
+// ---- Dictionary-less sample decodes with an empty dictionary --------------
+if (
+  noDictResult.length !== noDict.expectedOutput.length ||
+  !noDictResult.output.every((b, i) => b === noDict.expectedOutput[i])
+) {
+  throw new Error('no-dictionary sample output mismatch');
+}
+
 // Also prove a corrupted dictionary rejects the source range.
 let rangeError = null;
 try {
@@ -150,6 +224,40 @@ const sample = {
   truncated: {
     deltaBase64: b64(truncatedDelta),
     expectedCode: 'TRUNCATED',
+  },
+  crossWindow: {
+    deltaBase64: b64(crossWindow.delta),
+    expectedLength: crossResult.length,
+    expectedSha256: sha256(crossResult.output),
+    expectedWindowCount: crossResult.windows.length,
+    // The crossing COPY (window 3, first instruction) and its per-window
+    // evidence segments; bytes hex re-assembled from the segments must equal
+    // the bytes the COPY actually produced.
+    crossingCopy: {
+      windowIndex: 2,
+      seq: 0,
+      size: 6,
+      producedHex: Buffer.from(encoder.encode('DABCDE')).toString('hex'),
+      segments: crossCopy.ranges.map((s) => ({
+        start: s.start,
+        end: s.end,
+        producerWindow: s.producerWindow,
+      })),
+    },
+    // Second COPY lives entirely inside window 1's output.
+    singleCopy: {
+      seq: 1,
+      start: 21,
+      end: 24,
+      producerWindow: 1,
+    },
+  },
+  noDict: {
+    deltaBase64: b64(noDict.delta),
+    expectedLength: noDictResult.length,
+    expectedSha256: sha256(noDictResult.output),
+    expectedWindowCount: noDictResult.windows.length,
+    crossingSegments: [[0, 2, 4], [1, 4, 6]],
   },
 };
 

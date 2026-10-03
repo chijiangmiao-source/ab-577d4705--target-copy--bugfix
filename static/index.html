@@ -142,6 +142,24 @@ function describeRange(r) {
   return area + ' ' + span + producer;
 }
 
+// COPY evidence: when a TARGET source read crosses the boundary between two
+// earlier windows the API returns one segment per producing window. Each
+// segment is rendered on its own line with its real window and byte range;
+// a single-segment COPY renders exactly as before.
+function describeCopyRanges(ins) {
+  const segments = Array.isArray(ins.ranges) && ins.ranges.length > 0
+    ? ins.ranges
+    : (ins.range ? [ins.range] : []);
+  if (segments.length <= 1) return describeRange(segments[0]);
+  const total = segments.reduce((n, s) => n + (s.end - s.start), 0);
+  const head = `<div class="muted" style="margin-bottom:3px">历史读取跨越 ${segments.length} 个窗口，` +
+    `按实际产出字节分段（合计 ${total} B）：</div>`;
+  const lines = segments.map((s, i) =>
+    `<div style="margin:2px 0">${describeRange(s)}</div>`,
+  ).join('');
+  return head + lines;
+}
+
 function renderInstruction(ins) {
   const cells = [];
   cells.push(`<td class="num">${ins.seq}</td>`);
@@ -159,7 +177,7 @@ function renderInstruction(ins) {
     cells.push(`<td class="num">${ins.size}</td>`);
     cells.push(`<td>U地址 <span class="hex">${ins.address}</span><br>
       <span class="muted">编码值 ${ins.encoded} @偏移 ${ins.encodedOffset}${ins.overlaps ? ' · 自重叠逐字节' : ''}</span></td>`);
-    cells.push(`<td>${describeRange(ins.range)}</td>`);
+    cells.push(`<td>${describeCopyRanges(ins)}</td>`);
     cells.push('<td></td>');
   }
   cells.push(`<td class="num muted">${ins.codeOffset}</td>`);

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-03T01:58:22.038Z",
+  "generatedAt": "2026-10-03T13:45:07.514Z",
   "dictionaryBase64": "MDEyMzQ1Njc4OS1IRUxMTy1ESUNU",
   "valid": {
     "deltaBase64": "1sPEAAABFQASGAAGBQJXT1JMRCF7BhQABAALAgsFDw0AAgUDPj4VMwEDdQUFBQ==",
@@ -20,5 +20,53 @@
   "truncated": {
     "deltaBase64": "1sPEAAABFQASGAAGBQJXT1JMRCF7BhQABAALAgsFDw0AAgUDPj4VMwEDdQ==",
     "expectedCode": "TRUNCATED"
+  },
+  "crossWindow": {
+    "deltaBase64": "1sPEAAABFQANEAAFAgFXT1JMRHsGAAAOCAAIAQBBQkNERUZHSAkCCw0NCwACBAIhIRYzAwMCBg==",
+    "expectedLength": 35,
+    "expectedSha256": "696dca1a1aa06de7c86a22f606b717a110e55614bfb74b63f32e2513317bd386",
+    "expectedWindowCount": 3,
+    "crossingCopy": {
+      "windowIndex": 2,
+      "seq": 0,
+      "size": 6,
+      "producedHex": "444142434445",
+      "segments": [
+        {
+          "start": 15,
+          "end": 16,
+          "producerWindow": 0
+        },
+        {
+          "start": 16,
+          "end": 21,
+          "producerWindow": 1
+        }
+      ]
+    },
+    "singleCopy": {
+      "seq": 1,
+      "start": 21,
+      "end": 24,
+      "producerWindow": 1
+    }
+  },
+  "noDict": {
+    "deltaBase64": "1sPEAAAACgQABAEAQUFBQQUACgQABAEAQkJCQgUCBAIHBAAAAQF0AA==",
+    "expectedLength": 12,
+    "expectedSha256": "fac30e04f7db9dc295c6a9ad034bbd48017868632855b933b794139911c3e1d3",
+    "expectedWindowCount": 3,
+    "crossingSegments": [
+      [
+        0,
+        2,
+        4
+      ],
+      [
+        1,
+        4,
+        6
+      ]
+    ]
   }
 }

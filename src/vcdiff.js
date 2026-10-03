@@ -280,7 +280,6 @@ export function decodeVcdiff(delta, dictionary = new Uint8Array(0), options = {}
     let sourcePosition = 0;
     let sourceLength = 0;
     let source = new Uint8Array(0);
-    let targetProducerWindow = null;
 
     if (winIndicator !== 0) {
       const lenInfo = r.integer();
@@ -311,10 +310,6 @@ export function decodeVcdiff(delta, dictionary = new Uint8Array(0), options = {}
           );
         }
         source = output.subarray(sourcePosition, sourcePosition + sourceLength);
-        targetProducerWindow = windows.find((window) =>
-          sourcePosition >= window.targetOffset &&
-          sourcePosition < window.targetOffset + window.targetLength,
-        ) ?? null;
       }
     }
 
@@ -451,22 +446,53 @@ export function decodeVcdiff(delta, dictionary = new Uint8Array(0), options = {}
       return { address, encoded, encodedOffset };
     };
 
-    const describeRange = (uAddress, size) => {
-      if (uAddress < sourceLength) {
-        const start = sourcePosition + uAddress;
-        return {
-          area: sourceKind === 'TARGET' ? 'PRIOR_TARGET' : 'SOURCE_DICT',
+    // Resolve the byte ranges a COPY actually reads. A TARGET source segment
+    // may start in one earlier window and extend into the next historical
+    // window (VCD_TARGET source segments are not constrained to a single
+    // window), so a COPY whose read crosses that boundary must report one
+    // evidence segment per producing window. Every segment covers the exact
+    // output bytes read; the segments are contiguous and in order, so their
+    // lengths always sum to the COPY size.
+    const describeRanges = (uAddress, size) => {
+      if (uAddress >= sourceLength) {
+        const start = windowOutputStart + (uAddress - sourceLength);
+        return [{
+          area: 'CURRENT_TARGET',
           start,
           end: start + size,
-          producerWindow: targetProducerWindow?.index ?? null,
-        };
+          producerWindow: windows.length,
+        }];
       }
-      return {
-        area: 'CURRENT_TARGET',
-        start: windowOutputStart + (uAddress - sourceLength),
-        end: windowOutputStart + (uAddress - sourceLength) + size,
-        producerWindow: windows.length,
-      };
+      if (sourceKind !== 'TARGET') {
+        const start = sourcePosition + uAddress;
+        return [{
+          area: 'SOURCE_DICT',
+          start,
+          end: start + size,
+          producerWindow: null,
+        }];
+      }
+      const segments = [];
+      const readStart = sourcePosition + uAddress;
+      const readEnd = readStart + size;
+      let cursor = readStart;
+      for (const window of windows) {
+        const segStart = Math.max(cursor, window.targetOffset);
+        const segEnd = Math.min(readEnd, window.targetOffset + window.targetLength);
+        if (segStart < segEnd) {
+          segments.push({
+            area: 'PRIOR_TARGET',
+            start: segStart,
+            end: segEnd,
+            producerWindow: window.index,
+          });
+          cursor = segEnd;
+          if (cursor >= readEnd) break;
+        }
+      }
+      // Validity of the TARGET source segment was checked when the window
+      // header was parsed, so every copied byte belongs to an earlier window.
+      return segments;
     };
 
     const runInstruction = (instType, size, mode, codeOffset) => {
@@ -550,6 +576,20 @@ export function decodeVcdiff(delta, dictionary = new Uint8Array(0), options = {}
           output[windowOutputStart + generated] = value;
           generated += 1;
         }
+        const ranges = describeRanges(address, size);
+        // For a single-area COPY, range is that segment. When the read crosses
+        // historical window boundaries, range keeps only the overall read
+        // interval (producerWindow null): the per-window attribution lives in
+        // ranges, so no evidence ever assigns the other window's bytes to the
+        // window that owns the segment start.
+        const range = ranges.length === 1
+          ? ranges[0]
+          : {
+              area: 'PRIOR_TARGET',
+              start: ranges[0].start,
+              end: ranges[ranges.length - 1].end,
+              producerWindow: null,
+            };
         instructions.push({
           seq: order,
           op: 'COPY',
@@ -559,7 +599,9 @@ export function decodeVcdiff(delta, dictionary = new Uint8Array(0), options = {}
           encoded,
           encodedOffset,
           address,
-          range: describeRange(address, size),
+          range,
+          ranges,
+          crossesWindows: ranges.length > 1,
           overlaps,
           codeOffset,
         });
